@@ -1,0 +1,200 @@
+import express from 'express';
+import http from 'http';
+import { Server } from 'socket.io';
+import mongoose from 'mongoose';
+import cors from 'cors';
+import authRoutes from './routes/auth';
+import messageRoutes from './routes/messages';
+
+const app = express();
+const server = http.createServer(app);
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// Database connection
+mongoose.connect('mongodb://localhost:27017/chat-app')
+  .then(() => console.log('Connected to MongoDB'))
+  .catch(err => console.error('MongoDB connection error:', err));
+
+// Routes
+app.use('/api/auth', authRoutes);
+app.use('/api/messages', messageRoutes);
+
+// Socket.io setup
+const io = new Server(server, {
+  cors: {
+    origin: "http://localhost:3000",
+    methods: ["GET", "POST"]
+  }
+});
+
+// Socket.io connection handling
+io.on('connection', (socket) => {
+  console.log('New client connected:', socket.id);
+  
+  // Join room event
+  socket.on('join_room', (room) => {
+    socket.join(room);
+    console.log(`User ${socket.id} joined room ${room}`);
+  });
+  
+  // Send message event
+  socket.on('send_message', (data) => {
+    socket.to(data.room).emit('receive_message', data);
+    // Here you would also save the message to the database
+  });
+  
+  // Typing indicator event
+  socket.on('typing', (data) => {
+    socket.broadcast.to(data.room).emit('user_typing', {
+      userId: data.userId,
+      isTyping: data.isTyping
+    });
+  });
+  
+  // Disconnect event
+  socket.on('disconnect', () => {
+    console.log('Client disconnected:', socket.id);
+  });
+});
+
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});import React, { useState, useEffect } from 'react';
+import { io, Socket } from 'socket.io-client';
+import Login from './components/Login';
+import Chat from './components/Chat';
+
+const socket: Socket = io('http://localhost:5000');
+
+const App: React.FC = () => {
+  const [user, setUser] = useState<string | null>(null);
+  const [room, setRoom] = useState<string | null>(null);
+
+  return (
+    <div className="app">
+      {!user ? (
+        <Login setUser={setUser} setRoom={setRoom} socket={socket} />
+      ) : (
+        <Chat user={user} room={room} socket={socket} />
+      )}
+    </div>
+  );
+};
+
+export default App;import React, { useState, useEffect } from 'react';
+import Message from './Message';
+import OnlineUsers from './OnlineUsers';
+
+interface ChatProps {
+  user: string;
+  room: string;
+  socket: Socket;
+}
+
+const Chat: React.FC<ChatProps> = ({ user, room, socket }) => {
+  const [message, setMessage] = useState('');
+  const [messages, setMessages] = useState<Array<{
+    user: string;
+    text: string;
+    time: string;
+  }>>([]);
+  const [typingUsers, setTypingUsers] = useState<string[]>([]);
+
+  useEffect(() => {
+    socket.emit('join_room', room);
+    
+    socket.on('receive_message', (data) => {
+      setMessages(prev => [...prev, {
+        user: data.user,
+        text: data.text,
+        time: new Date().toLocaleTimeString()
+      }]);
+    });
+    
+    socket.on('user_typing', (data) => {
+      if (data.isTyping) {
+        setTypingUsers(prev => [...prev, data.userId]);
+      } else {
+        setTypingUsers(prev => prev.filter(u => u !== data.userId));
+      }
+    });
+
+    return () => {
+      socket.off('receive_message');
+      socket.off('user_typing');
+    };
+  }, [room, socket]);
+
+  const sendMessage = () => {
+    if (message.trim()) {
+      socket.emit('send_message', {
+        room,
+        user,
+        text: message,
+        time: new Date().toLocaleTimeString()
+      });
+      setMessage('');
+      // Notify others that typing has stopped
+      socket.emit('typing', {
+        room,
+        userId: user,
+        isTyping: false
+      });
+    }
+  };
+
+  const handleTyping = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setMessage(e.target.value);
+    // Notify others when user starts typing
+    if (e.target.value && !typingUsers.includes(user)) {
+      socket.emit('typing', {
+        room,
+        userId: user,
+        isTyping: true
+      });
+    } else if (!e.target.value && typingUsers.includes(user)) {
+      socket.emit('typing', {
+        room,
+        userId: user,
+        isTyping: false
+      });
+    }
+  };
+
+  return (
+    <div className="chat-container">
+      <div className="chat-header">
+        <h2>Room: {room}</h2>
+        <OnlineUsers socket={socket} currentUser={user} room={room} />
+      </div>
+      
+      <div className="messages-container">
+        {messages.map((msg, index) => (
+          <Message key={index} message={msg} isCurrentUser={msg.user === user} />
+        ))}
+      </div>
+      
+      <div className="typing-indicator">
+        {typingUsers.length > 0 && (
+          <p>{typingUsers.join(', ')} {typingUsers.length > 1 ? 'are' : 'is'} typing...</p>
+        )}
+      </div>
+      
+      <div className="message-input">
+        <input
+          type="text"
+          value={message}
+          onChange={handleTyping}
+          placeholder="Type a message..."
+        />
+        <button onClick={sendMessage}>Send</button>
+      </div>
+    </div>
+  );
+};
+
+export default Chat;
